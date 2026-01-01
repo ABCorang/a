@@ -1,0 +1,269 @@
+<!doctype html>
+<html lang="ja">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width,initial-scale=1" />
+  <title>画像 → PDF（ブラウザ完結・順序保持）</title>
+  <style>
+    :root{font-family:system-ui,-apple-system,Segoe UI,Roboto,"Hiragino Kaku Gothic ProN","Noto Sans JP",sans-serif}
+    body{max-width:980px;margin:28px auto;padding:16px}
+    h1{font-size:20px;margin-bottom:8px}
+    #drop{border:2px dashed #888;border-radius:10px;padding:24px;text-align:center;color:#444}
+    #drop.dragover{border-color:#2b8cff;background:#f0f7ff}
+    .controls{margin-top:12px;display:flex;gap:8px;align-items:center;flex-wrap:wrap}
+    button,select,input[type=text]{padding:8px 12px;border-radius:8px;border:1px solid #ccc;background:#fff;cursor:pointer}
+    button:disabled{opacity:.5;cursor:not-allowed}
+    #fileList{margin-top:14px;list-style:none;padding:0}
+    .fileItem{display:flex;gap:12px;align-items:center;padding:8px;border-radius:8px;border:1px solid #eee;margin-bottom:8px;background:#fafafa}
+    .fileItem.dragging{opacity:.4}
+    .fileHandle{cursor:grab;padding:6px 10px;border-radius:6px;background:#fff;border:1px solid #ddd;font-size:12px}
+    .meta{flex:1}
+    .meta .name{font-weight:600}
+    .meta .info{font-size:12px;color:#555}
+    .small{font-size:13px;color:#666;margin-top:6px}
+    label.inline{display:flex;align-items:center;gap:8px}
+  </style>
+</head>
+<body>
+  <h1>画像 → PDF（ブラウザ内で完結、ドラッグ順保持）</h1>
+  <div id="drop">ここに画像ファイルをドロップ、または下のボタンで選択してください。<br><small>ドラッグした順にリストへ追加されます。リスト内はドラッグで並べ替え可能。</small></div>
+
+  <div class="controls">
+    <input id="fileInput" type="file" accept="image/*" multiple style="display:none">
+    <button id="btnChoose">ファイル選択</button>
+    <button id="btnCreate" disabled>PDFを作成してダウンロード</button>
+
+    <label class="inline"><input id="fitA4" type="checkbox"> A4にフィット（余白を追加）</label>
+    <label class="inline">出力ファイル名: <input id="outName" type="text" value="images.pdf" style="min-width:160px"></label>
+  </div>
+
+  <ul id="fileList"></ul>
+
+  <div class="small">注意: すべてブラウザ内で処理します。大量の画像や高解像度はメモリを消費します。</div>
+
+  <!-- pdf-lib を CDN から読み込み -->
+  <script src="https://unpkg.com/pdf-lib/dist/pdf-lib.min.js"></script>
+
+  <script>
+    // UI 要素
+    const drop = document.getElementById('drop');
+    const fileInput = document.getElementById('fileInput');
+    const btnChoose = document.getElementById('btnChoose');
+    const btnCreate = document.getElementById('btnCreate');
+    const fileList = document.getElementById('fileList');
+    const fitA4 = document.getElementById('fitA4');
+    const outName = document.getElementById('outName');
+
+    // 内部データ: {id,file,name,size,width,height,blob,arrayBuffer,previewUrl}
+    const files = [];
+    let idCounter = 1;
+
+    function niceSize(n){
+      if(n<1024) return n+' B';
+      if(n<1024*1024) return (n/1024).toFixed(1)+' KB';
+      return (n/(1024*1024)).toFixed(2)+' MB';
+    }
+
+    ;['dragenter','dragover'].forEach(e => drop.addEventListener(e, ev => {ev.preventDefault(); drop.classList.add('dragover');}));
+    ;['dragleave','drop'].forEach(e => drop.addEventListener(e, ev => {ev.preventDefault(); drop.classList.remove('dragover');}));
+
+    drop.addEventListener('drop', async ev => {
+      const dt = ev.dataTransfer;
+      if(!dt) return;
+      const list = Array.from(dt.files).filter(f => f.type.startsWith('image/') || /\.(jpe?g|png|gif|bmp|webp)$/i.test(f.name));
+      await addFiles(list);
+    });
+
+    btnChoose.addEventListener('click', () => fileInput.click());
+    fileInput.addEventListener('change', async e => {
+      const list = Array.from(e.target.files).filter(f => f.type.startsWith('image/') || /\.(jpe?g|png|gif|bmp|webp)$/i.test(f.name));
+      await addFiles(list);
+      fileInput.value = '';
+    });
+
+    async function addFiles(list){
+      for(const f of list){
+        const id = idCounter++;
+        const entry = {id,file:f,name:f.name,size:f.size,width:null,height:null,arrayBuffer:null,previewUrl:null};
+        files.push(entry);
+        renderList();
+        // 画像を読み込みサイズを取得
+        try{
+          const blob = f; // File is a Blob
+          entry.previewUrl = URL.createObjectURL(blob);
+          const img = await loadImage(entry.previewUrl);
+          entry.width = img.naturalWidth;
+          entry.height = img.naturalHeight;
+          // 事前に ArrayBuffer を保持（pdf-lib 用）
+          entry.arrayBuffer = await blob.arrayBuffer();
+        }catch(err){
+          console.error('image load error', err);
+        }
+        renderList();
+      }
+      updateControls();
+    }
+
+    function loadImage(url){
+      return new Promise((res, rej) => {
+        const img = new Image();
+        img.onload = () => res(img);
+        img.onerror = (e) => rej(e);
+        img.src = url;
+      });
+    }
+
+    function renderList(){
+      fileList.innerHTML = '';
+      for(const item of files){
+        const li = document.createElement('li');
+        li.className = 'fileItem';
+        li.draggable = true;
+        li.dataset.id = item.id;
+
+        const handle = document.createElement('div');
+        handle.className = 'fileHandle';
+        handle.textContent = '☰';
+        li.appendChild(handle);
+
+        const meta = document.createElement('div');
+        meta.className = 'meta';
+        const name = document.createElement('div');
+        name.className = 'name';
+        name.textContent = item.name;
+        const info = document.createElement('div');
+        info.className = 'info';
+        info.textContent = `${niceSize(item.size)}${item.width?` · ${item.width}×${item.height}px`: ' · 読み込み中...'}`;
+        meta.appendChild(name);
+        meta.appendChild(info);
+        li.appendChild(meta);
+
+        const thumb = document.createElement('img');
+        thumb.src = item.previewUrl || '';
+        thumb.style.width = '64px';
+        thumb.style.height = 'auto';
+        thumb.style.objectFit = 'cover';
+        thumb.style.borderRadius = '6px';
+        li.insertBefore(thumb, meta);
+
+        const del = document.createElement('button');
+        del.textContent = '削除';
+        del.addEventListener('click', () => {
+          const idx = files.findIndex(x => x.id==item.id);
+          if(idx>=0){
+            URL.revokeObjectURL(item.previewUrl);
+            files.splice(idx,1);
+          }
+          renderList(); updateControls();
+        });
+        li.appendChild(del);
+
+        // ドラッグ並べ替え
+        li.addEventListener('dragstart', ev => {
+          ev.dataTransfer.setData('text/plain', String(item.id));
+          li.classList.add('dragging');
+        });
+        li.addEventListener('dragend', ev => { li.classList.remove('dragging'); });
+
+        li.addEventListener('dragover', ev => { ev.preventDefault(); ev.currentTarget.style.outline = '2px dashed #2b8cff'; });
+        li.addEventListener('dragleave', ev => { ev.currentTarget.style.outline = ''; });
+        li.addEventListener('drop', ev => {
+          ev.preventDefault();
+          const fromId = Number(ev.dataTransfer.getData('text/plain'));
+          const toId = item.id;
+          reorder(fromId, toId);
+        });
+
+        fileList.appendChild(li);
+      }
+      updateControls();
+    }
+
+    function reorder(fromId, toId){
+      const fromIdx = files.findIndex(x => x.id === fromId);
+      const toIdx = files.findIndex(x => x.id === toId);
+      if(fromIdx<0 || toIdx<0) return;
+      const [item] = files.splice(fromIdx,1);
+      files.splice(toIdx,0,item);
+      renderList();
+    }
+
+    function updateControls(){
+      btnCreate.disabled = files.length === 0;
+    }
+
+    btnCreate.addEventListener('click', async () => {
+      btnCreate.disabled = true;
+      btnCreate.textContent = '作成中...';
+      try{
+        const pdfDoc = await PDFLib.PDFDocument.create();
+
+        // A4 サイズ（ポイント: 595.28 x 841.89）
+        const A4 = {w:595.28, h:841.89};
+
+        for(const f of files){
+          // 既に arrayBuffer を保持しているはず
+          const ab = f.arrayBuffer || await f.file.arrayBuffer();
+          const mime = f.file.type || guessMime(f.name);
+
+          let embeddedImage;
+          if(mime === 'image/jpeg' || /\.jpe?g$/i.test(f.name)){
+            embeddedImage = await pdfDoc.embedJpg(ab);
+          }else{
+            embeddedImage = await pdfDoc.embedPng(ab);
+          }
+
+          const imgDims = embeddedImage.scale(1);
+          // imgDims.width/height are in PDF points reflecting pixel dimensions
+          let pageWidth = imgDims.width;
+          let pageHeight = imgDims.height;
+
+          if(fitA4.checked){
+            // A4 に収める（縦横どちらでもフィット）
+            const scale = Math.min(A4.w / pageWidth, A4.h / pageHeight, 1);
+            const pw = pageWidth * scale;
+            const ph = pageHeight * scale;
+            const page = pdfDoc.addPage([A4.w, A4.h]);
+            // 中央に配置
+            const x = (A4.w - pw) / 2;
+            const y = (A4.h - ph) / 2;
+            page.drawImage(embeddedImage, {x, y, width: pw, height: ph});
+          }else{
+            // 画像サイズそのままのページを作る
+            const page = pdfDoc.addPage([pageWidth, pageHeight]);
+            page.drawImage(embeddedImage, {x:0, y:0, width: pageWidth, height: pageHeight});
+          }
+        }
+
+        const pdfBytes = await pdfDoc.save();
+        const blob = new Blob([pdfBytes], {type:'application/pdf'});
+        const url = URL.createObjectURL(blob);
+        const a = document.createElement('a');
+        a.href = url;
+        a.download = outName.value.trim() || 'images.pdf';
+        document.body.appendChild(a);
+        a.click();
+        a.remove();
+        URL.revokeObjectURL(url);
+
+      }catch(err){
+        console.error(err);
+        alert('PDF作成中にエラーが発生しました。コンソールを確認してください。');
+      }finally{
+        btnCreate.disabled = false;
+        btnCreate.textContent = 'PDFを作成してダウンロード';
+      }
+    });
+
+    function guessMime(name){
+      if(/\.jpe?g$/i.test(name)) return 'image/jpeg';
+      if(/\.png$/i.test(name)) return 'image/png';
+      if(/\.gif$/i.test(name)) return 'image/gif';
+      return 'image/png';
+    }
+
+    // 初期
+    updateControls();
+  </script>
+</body>
+</html>
