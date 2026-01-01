@@ -22,6 +22,7 @@
     .meta .info{font-size:12px;color:#555}
     .small{font-size:13px;color:#666;margin-top:6px}
     label.inline{display:flex;align-items:center;gap:8px}
+    #progress{min-height:18px}
   </style>
 </head>
 <body>
@@ -47,6 +48,8 @@
 
   <ul id="fileList"></ul>
 
+  <div id="progress" class="small" aria-live="polite"></div>
+
   <div class="small">注意: すべてブラウザ内で処理します。大量の画像や高解像度はメモリを消費します。</div>
 
   <!-- pdf-lib を CDN から読み込み -->
@@ -65,6 +68,7 @@
     const enableOCR = document.getElementById('enableOCR');
     const ocrLang = document.getElementById('ocrLang');
     const outName = document.getElementById('outName');
+    const progress = document.getElementById('progress');
 
     // 内部データ: {id,file,name,size,width,height,blob,arrayBuffer,previewUrl}
     const files = [];
@@ -200,13 +204,22 @@
       renderList();
     }
 
+    function setProgress(message){
+      progress.textContent = message || '';
+    }
+
     function updateControls(){
       btnCreate.disabled = files.length === 0;
+      if(files.length === 0){
+        setProgress('');
+      }
     }
 
     btnCreate.addEventListener('click', async () => {
       btnCreate.disabled = true;
       btnCreate.textContent = '作成中...';
+      const total = files.length;
+      setProgress(`PDF作成を開始します（${total}ページ予定）`);
       try{
         const pdfDoc = await PDFLib.PDFDocument.create();
         const font = await pdfDoc.embedFont(PDFLib.StandardFonts.Helvetica);
@@ -214,6 +227,7 @@
         // A4 サイズ（ポイント: 595.28 x 841.89）
         const A4 = {w:595.28, h:841.89};
 
+        let index = 0;
         for(const f of files){
           // 既に arrayBuffer を保持しているはず
           const ab = f.arrayBuffer || await f.file.arrayBuffer();
@@ -262,6 +276,10 @@
               });
             }
           }
+
+          index += 1;
+          const percent = Math.round((index / total) * 100);
+          setProgress(`ページを追加中... ${index}/${total} (${percent}%)`);
         }
 
         // useObjectStreams=false で古いリーダーや外部サービスへの互換性を上げる
@@ -276,9 +294,12 @@
         a.remove();
         URL.revokeObjectURL(url);
 
+        setProgress('PDFを作成しました。ダウンロードを開始します。');
+
       }catch(err){
         console.error(err);
         alert('PDF作成中にエラーが発生しました。コンソールを確認してください。');
+        setProgress('PDF作成中にエラーが発生しました。');
       }finally{
         btnCreate.disabled = false;
         btnCreate.textContent = 'PDFを作成してダウンロード';
