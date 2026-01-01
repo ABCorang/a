@@ -34,6 +34,14 @@
     <button id="btnCreate" disabled>PDFを作成してダウンロード</button>
 
     <label class="inline"><input id="fitA4" type="checkbox"> A4にフィット（余白を追加）</label>
+    <label class="inline"><input id="enableOCR" type="checkbox"> 検索可能PDF（OCRでテキスト埋め込み）</label>
+    <label class="inline">OCR言語:
+      <select id="ocrLang">
+        <option value="jpn">日本語</option>
+        <option value="eng">英語</option>
+        <option value="jpn+eng" selected>日本語+英語</option>
+      </select>
+    </label>
     <label class="inline">出力ファイル名: <input id="outName" type="text" value="images.pdf" style="min-width:160px"></label>
   </div>
 
@@ -43,6 +51,8 @@
 
   <!-- pdf-lib を CDN から読み込み -->
   <script src="https://unpkg.com/pdf-lib/dist/pdf-lib.min.js"></script>
+  <!-- Tesseract.js for OCR -->
+  <script src="https://cdn.jsdelivr.net/npm/tesseract.js@5/dist/tesseract.min.js"></script>
 
   <script>
     // UI 要素
@@ -52,6 +62,8 @@
     const btnCreate = document.getElementById('btnCreate');
     const fileList = document.getElementById('fileList');
     const fitA4 = document.getElementById('fitA4');
+    const enableOCR = document.getElementById('enableOCR');
+    const ocrLang = document.getElementById('ocrLang');
     const outName = document.getElementById('outName');
 
     // 内部データ: {id,file,name,size,width,height,blob,arrayBuffer,previewUrl}
@@ -197,6 +209,7 @@
       btnCreate.textContent = '作成中...';
       try{
         const pdfDoc = await PDFLib.PDFDocument.create();
+        const font = await pdfDoc.embedFont(PDFLib.StandardFonts.Helvetica);
 
         // A4 サイズ（ポイント: 595.28 x 841.89）
         const A4 = {w:595.28, h:841.89};
@@ -228,14 +241,31 @@
             const x = (A4.w - pw) / 2;
             const y = (A4.h - ph) / 2;
             page.drawImage(embeddedImage, {x, y, width: pw, height: ph});
+            if(enableOCR.checked){
+              await drawOcrText(page, font, f, {
+                scale,
+                offsetX: x,
+                offsetY: y,
+                imgHeight: f.height
+              });
+            }
           }else{
             // 画像サイズそのままのページを作る
             const page = pdfDoc.addPage([pageWidth, pageHeight]);
             page.drawImage(embeddedImage, {x:0, y:0, width: pageWidth, height: pageHeight});
+            if(enableOCR.checked){
+              await drawOcrText(page, font, f, {
+                scale: 1,
+                offsetX: 0,
+                offsetY: 0,
+                imgHeight: f.height
+              });
+            }
           }
         }
 
-        const pdfBytes = await pdfDoc.save();
+        // useObjectStreams=false で古いリーダーや外部サービスへの互換性を上げる
+        const pdfBytes = await pdfDoc.save({ useObjectStreams:false });
         const blob = new Blob([pdfBytes], {type:'application/pdf'});
         const url = URL.createObjectURL(blob);
         const a = document.createElement('a');
@@ -254,6 +284,55 @@
         btnCreate.textContent = 'PDFを作成してダウンロード';
       }
     });
+
+    async function drawOcrText(page, font, fileEntry, layout){
+      try{
+        const { data } = await Tesseract.recognize(fileEntry.file, ocrLang.value);
+        const words = (data && data.words) || [];
+
+        const scale = layout.scale || 1;
+        const offsetX = layout.offsetX || 0;
+        const offsetY = layout.offsetY || 0;
+        const imgHeight = layout.imgHeight || fileEntry.height || page.getHeight();
+        for(const w of words){
+          if(!w.text || !w.bbox) continue;
+          const { x0, y0, x1, y1 } = w.bbox;
+          const width = (x1 - x0) * scale;
+          const height = (y1 - y0) * scale;
+          const x = offsetX + x0 * scale;
+          const y = offsetY + (imgHeight - y1) * scale;
+          const fontSize = Math.max(6, Math.min(height, 24));
+          page.drawText(w.text.trim(), {
+            x,
+            y,
+            size: fontSize,
+            font,
+            color: PDFLib.rgb(0,0,0),
+            opacity: 0.02,
+            lineHeight: height * 0.95
+          });
+        }
+
+        if(!words.length && data && data.text){
+          const lines = data.text.split(/\r?\n/).filter(Boolean);
+          let y = offsetY + (layout.pageHeight || page.getHeight()) - 20;
+          for(const line of lines){
+            page.drawText(line, {
+              x: offsetX + 10,
+              y,
+              size: 10,
+              font,
+              color: PDFLib.rgb(0,0,0),
+              opacity: 0.02
+            });
+            y -= 12;
+            if(y < 10) break;
+          }
+        }
+      }catch(err){
+        console.error('OCR failed', err);
+      }
+    }
 
     function guessMime(name){
       if(/\.jpe?g$/i.test(name)) return 'image/jpeg';
